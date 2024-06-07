@@ -6,6 +6,7 @@ import torch
 
 Function = Callable[[torch.Tensor], torch.Tensor]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# %%
 
 
 def numbers_to_bit_strings(numbers: torch.Tensor, input_size: int, zero_one=False):
@@ -138,6 +139,7 @@ def vec_fourier_transform(vec: torch.Tensor, boolean_outputs: bool = True):
     vec = vec.to(device)
     assert vec.shape[0] == 2 ** int(np.log2(float(vec.shape[0])))
     input_size = int(np.log2(vec.shape[0]))
+    print(input_size)
     basis = all_parity_vectors(input_size).to(device)
     coeffs = basis @ vec / 2**input_size
     all_bit_strings = numbers_to_bit_strings(
@@ -155,5 +157,95 @@ def vec_fourier_transform(vec: torch.Tensor, boolean_outputs: bool = True):
     return coeffs, coeffs_dict
 
 
-a = torch.tensor([1, 0, 0, 0, 0, 1.0, 0, 0])
-print(torch.fft.fft(a))
+def walsh_hadamard_transform(vec: torch.Tensor):
+    """
+    Compute the Walsh-Hadamard transform of a Boolean function f using PyTorch.
+
+    Parameters:
+    f (torch.Tensor): Tensor representing the Boolean function values.
+
+    Returns:
+    torch.Tensor: Tensor representing the Fourier coefficients.
+    """
+    n = vec.shape[0]
+    assert (n & (n - 1)) == 0, "Size of input must be a power of 2"
+
+    # Initialize H as the input tensor f
+    H = vec.clone()
+    h = 1
+    while h < n:
+        for i in range(0, n, h * 2):
+            for j in range(h):
+                x = H[i + j]
+                y = H[i + j + h]
+                H[i + j] = x + y
+                H[i + j + h] = x - y
+        h *= 2
+
+    return H / torch.sqrt(torch.tensor(n, dtype=vec.dtype))
+
+
+# def boolean_fourier_transform(vec: torch.Tensor):
+#     # n = vec.dim()  # Get the number of input variables
+#     # truth_table = torch.tensor(
+#     #     [vec[tuple(int(b) for b in bin(i)[2:].zfill(n))] for i in range(2**n)], dtype=torch.float32
+#     # )
+#     truth_table = vec
+#     input_size = len(vec)
+#     truth_table = truth_table * 2 - 1  # Convert from {0, 1} to {-1, 1}
+
+#     # Compute the Walsh-Hadamard transform
+#     wht_coefficients = torch.fft.fft(truth_table)
+
+#     # Scale the coefficients to obtain the Boolean Fourier transform coefficients
+#     bft_coefficients = wht_coefficients / (2 ** (input_size / 2))
+
+#     return bft_coefficients
+
+
+# # Example Boolean function as a list of 0s and 1s
+# boolean_function = [1, 0, 1, 0, 1, 1.0, 0, 0]
+
+# # Convert Boolean function to a PyTorch tensor
+# boolean_tensor = torch.tensor(boolean_function, dtype=torch.float32)
+# # boolean_tensor = zero_one_bits_to_minus_one_one_bits(boolean_tensor)
+
+# # Compute the Boolean Fourier transform
+# fourier_coefficients = walsh_hadamard_transform(boolean_tensor)
+
+# print(fourier_coefficients, (fourier_coefficients**2).sum())
+# print(vec_fourier_transform(boolean_tensor)[0])
+# # print(
+# #     torch.fft.fft(boolean_tensor) / 2**3,
+# # )
+# print(boolean_fourier_transform(boolean_tensor))
+
+# %%
+# tensor = torch.zeros(64)
+# tensor[-1] = 1.0
+# vec_fourier_transform(tensor)[1]
+
+
+# %%
+def boolean_fourier_transform(f: torch.Tensor):
+    n = f.size(0).bit_length() - 1
+    assert f.size(0) == 2**n, "Input length must be a power of 2"
+
+    # Define the Hadamard matrix recursively
+    def hadamard_matrix(order: int):
+        if order == 0:
+            return torch.tensor([[1]], dtype=torch.float32)
+        else:
+            H = hadamard_matrix(order - 1)
+            return torch.cat([torch.cat([H, H], dim=1), torch.cat([H, -H], dim=1)], dim=0)
+
+    H = hadamard_matrix(n)
+
+    # Compute the Fourier coefficients
+    F = torch.matmul(H, f.float()) / (2**n)
+
+    return torch.sign(F)  # Output is either -1 or 1
+
+
+# boolean_fourier_transform(tensor)
+# tensor
