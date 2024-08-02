@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 from torch.utils.data import Dataset
+import itertools
 
 # %%
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -86,21 +87,52 @@ class MultiTaskDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         return self.data[idx], self.targets[idx]
 
 
+class MultiTaskTestDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
+    def __init__(
+        self,
+        n_task_bits: int,
+        n_control_bits: int,
+        relevant_vars: torch.Tensor,
+    ):
+        self.n_task_bits = n_task_bits
+        self.n_control_bits = n_control_bits
+        self.relevant_vars = relevant_vars
+        
+        # Generate all possible task bit combinations
+        self.task_bits = self.generate_all_bit_vectors(n_task_bits)
+        
+        # Create control bits for each task
+        self.control_bits = torch.eye(n_control_bits)
+        
+        # Combine control bits and task bits
+        self.data = torch.cat([
+            self.control_bits.repeat_interleave(len(self.task_bits), dim=0),
+            self.task_bits.repeat(n_control_bits, 1)
+        ], dim=1)
+        
+        # Calculate targets
+        self.targets = torch.stack([
+            self.task_bits[:, task].sum(dim=1) % 2
+            for task in relevant_vars
+        ]).t().flatten()
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx: int | slice):
+        return self.data[idx], self.targets[idx]
+
+    def generate_all_bit_vectors(self, n: int):
+        # Generate all possible combinations of 0 and 1 of length n
+        all_combinations = list(itertools.product([0, 1], repeat=n))
+        return torch.tensor(all_combinations, dtype=torch.float32)
+
 def generate_random_relevant_vars(
     n_task_bits: int, n_control_bits: int, parity_size: int
 ) -> torch.Tensor:
-    vars = torch.randint(
-        0, n_task_bits, (n_control_bits, parity_size), dtype=torch.int64, device=device
-    )
-    # make sure that the relevant variables are unique
-    i = 0
-    # check if there are any duplicates
-    while len(set(vars)) < n_control_bits:
-        print("resampling random relevant vars")
-        i += 1
-        if i > 10:
-            raise Exception("Could not find unique relevant variables")
-        vars = torch.randint(0, n_task_bits, (n_control_bits,), dtype=torch.int64, device=device)
+    vars = torch.zeros(n_control_bits, parity_size, dtype=torch.int64)
+    for i in range(n_control_bits):
+        vars[i] = torch.randperm(n_task_bits)[:parity_size]
     return vars
 
 
@@ -119,17 +151,23 @@ def generate_dataset(
     ).squeeze()
     return MultiTaskDataset(n_task_bits, n_control_bits, relevant_vars, dataset_lengths)
 
+def generate_test_set(
+    n_task_bits: int,
+    n_control_bits: int,
+    tasks: torch.Tensor, # aka relevant_vars
+):
+    return MultiTaskTestDataset(n_task_bits, n_control_bits, tasks)
+
 
 # %%
 # # test the multitask dataset
 # n_task_bits = 4
-# n_control_bits = 4
-# relevant_vars = torch.tensor([[0, 1], [2, 3], [0, 2], [1, 3]])
+# n_control_bits = 3
+# relevant_vars = torch.tensor([[0, 1], [0, 2], [1, 2]])
 # dataset_length_per_task = 4
 
 # dataset = MultiTaskDataset(n_task_bits, n_control_bits, relevant_vars, dataset_length_per_task)
 # print(dataset.data, dataset.targets)
-
 
 # %%
 class MicroTransformer(nn.Module):
@@ -259,22 +297,29 @@ class MLP(nn.Module):
 # training loop with logging to wandb. Each step, generate a new dataset to train with of size
 # batch_size
 
-n_control_bits = 5
-n_task_bits = 30
-subtask_probs = torch.tensor([1.0, 2, 4, 8, 16])
+n_control_bits = 2
+n_task_bits = 10
+n_active_bits = 2 # k in the MSP spec
+subtask_probs = torch.tensor([2**i for i in range(n_control_bits)], dtype=torch.float32)
+# subtask_probs = torch.ones(n_control_bits, dtype=torch.float32)
 loss_fn = nn.BCELoss()
-n_steps = 100000
+n_steps = 25000
 batch_size = 100
 log_interval = 100
 
-tasks = generate_random_relevant_vars(n_task_bits, n_control_bits, 3)
+tasks = generate_random_relevant_vars(n_task_bits, n_control_bits, n_active_bits)
+# tasks = torch.tensor([[0, 1], [0, 2]])
 subtask_probs = subtask_probs / subtask_probs.sum()
-model = MLP(n_control_bits + n_task_bits, 100, 3, 1).to(device)
+d_mlp = 32
+n_hidden_layers = 5
+model = MLP(n_control_bits + n_task_bits, d_mlp, n_hidden_layers, 1).to(device)
 
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-wandb.init(project="quant", entity="jakemendel")
+testset = generate_test_set(n_task_bits, n_control_bits, tasks)
+
+wandb.init(project="quant")
 wandb.config.update(
     {
         "n_control_bits": n_control_bits,
@@ -284,6 +329,8 @@ wandb.config.update(
     }
 )
 wandb.watch(model)
+run_id = wandb.run.id
+run_name = wandb.run.name
 
 model.train()
 for i, step in enumerate(range(n_steps)):
@@ -296,11 +343,22 @@ for i, step in enumerate(range(n_steps)):
     loss.backward()
     optimizer.step()
     if i % log_interval == 0:
-        print(f"Step {step}, Loss: {loss.item()}")
         wandb.log({"loss": loss.item()})
-        # log accuracy
         accuracy = (y_pred.round() == y).float().mean().item()
         wandb.log({"accuracy": accuracy})
+        print(f"Step {step}, Loss: {loss.item()}, Accuracy: {accuracy}")
+
+        # Calculate and log per-task accuracy
+        x = testset.data
+        y = testset.targets
+        y_pred = model(x)
+        for task_id in range(n_control_bits):
+            task_mask = x[:, task_id] == 1
+            task_pred = y_pred[task_mask]
+            task_true = y[task_mask]
+            task_accuracy = (task_pred.round() == task_true).float().mean().item()
+            wandb.log({f"full_accuracies/task_{task_id}": task_accuracy})
+
         # log the loss on each subtask
         for j in range(n_control_bits):
             # generate a dataset of size batch_size for each subtask
@@ -313,7 +371,27 @@ for i, step in enumerate(range(n_steps)):
             accuracy = (y_pred.round() == y).float().mean().item()
             wandb.log({f"accuracies/task_{j}": accuracy})
 
+with torch.no_grad():
+    testset = generate_test_set(n_task_bits, n_control_bits, tasks)
+    
+    model.eval()
+    
+    x = testset.data
+    y = testset.targets
+    y_pred = model(x).round().squeeze()
+    
+    test_accuracy = (y == y_pred).float().mean().item()
+    print(f"Test Accuracy: {test_accuracy:.4f}")
+    wandb.log({"test_accuracy": test_accuracy})
+    
+    # Evaluate per-task accuracy
+    for task_id in range(n_control_bits):
+        task_mask = x[:, task_id] == 1
+        task_accuracy = (y_pred[task_mask] == y[task_mask]).float().mean().item()
+        print(f"Task {task_id} Accuracy: {task_accuracy:.4f}")
+        wandb.log({f"test_accuracies/task_{task_id}": task_accuracy})
+
 wandb.finish()
 # save model
-torch.save(model.state_dict(), "model.pth")
+torch.save(model.state_dict(), f"runs/model_{run_name}.pth")
 # %%
