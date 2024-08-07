@@ -277,7 +277,7 @@ class MultiHeadAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, d_input: int, d_mlp: int, n_hidden_layers: int, d_output: int):
+    def __init__(self, d_input: int, d_mlp: int, n_hidden_layers: int, d_output: int = 1):
         super().__init__()
         self.layers = nn.ModuleList(
             [nn.Linear(d_input, d_mlp)] + [nn.Linear(d_mlp, d_mlp) for _ in range(n_hidden_layers)]
@@ -294,104 +294,106 @@ class MLP(nn.Module):
 
 # %%
 
-# training loop with logging to wandb. Each step, generate a new dataset to train with of size
-# batch_size
+if __name__ == "__main__":
+    # training loop with logging to wandb. Each step, generate a new dataset to train with of size
+    # batch_size
 
-n_control_bits = 2
-n_task_bits = 10
-n_active_bits = 2 # k in the MSP spec
-subtask_probs = torch.tensor([2**i for i in range(n_control_bits)], dtype=torch.float32)
-# subtask_probs = torch.ones(n_control_bits, dtype=torch.float32)
-loss_fn = nn.BCELoss()
-n_steps = 25000
-batch_size = 100
-log_interval = 100
+    n_control_bits = 4
+    n_task_bits = 10
+    n_active_bits = 3 # k in the MSP spec
+    subtask_probs = torch.tensor([2**(n_control_bits - i) for i in range(n_control_bits)], dtype=torch.float32)
+    # subtask_probs = torch.ones(n_control_bits, dtype=torch.float32)
+    loss_fn = nn.BCELoss()
+    # loss_fn = nn.CrossEntropyLoss()
+    n_steps = 10000
+    batch_size = 100
+    log_interval = 100
 
-tasks = generate_random_relevant_vars(n_task_bits, n_control_bits, n_active_bits)
-# tasks = torch.tensor([[0, 1], [0, 2]])
-subtask_probs = subtask_probs / subtask_probs.sum()
-d_mlp = 32
-n_hidden_layers = 5
-model = MLP(n_control_bits + n_task_bits, d_mlp, n_hidden_layers, 1).to(device)
+    tasks = generate_random_relevant_vars(n_task_bits, n_control_bits, n_active_bits)
+    # tasks = torch.tensor([[0, 1], [0, 2]])
+    subtask_probs = subtask_probs / subtask_probs.sum()
+    d_mlp = 32
+    n_hidden_layers = 3
+    model = MLP(n_control_bits + n_task_bits, d_mlp, n_hidden_layers, 1).to(device)
 
 
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 
-testset = generate_test_set(n_task_bits, n_control_bits, tasks)
+    # testset = generate_test_set(n_task_bits, n_control_bits, tasks)
 
-wandb.init(project="quant")
-wandb.config.update(
-    {
-        "n_control_bits": n_control_bits,
-        "n_task_bits": n_task_bits,
-        "subtask_probs": subtask_probs.tolist(),
-        "tasks": {i: tasks[i].tolist() for i in range(len(tasks))},
-    }
-)
-wandb.watch(model)
-run_id = wandb.run.id
-run_name = wandb.run.name
+    wandb.init(project="quant")
+    wandb.config.update(
+        {
+            "n_control_bits": n_control_bits,
+            "n_task_bits": n_task_bits,
+            "subtask_probs": subtask_probs.tolist(),
+            "tasks": {i: tasks[i].tolist() for i in range(len(tasks))},
+        }
+    )
+    wandb.watch(model)
+    run_id = wandb.run.id
+    run_name = wandb.run.name
 
-model.train()
-for i, step in enumerate(range(n_steps)):
-    dataset = generate_dataset(n_task_bits, n_control_bits, tasks, subtask_probs, batch_size)
-    x = dataset.data
-    y = dataset.targets
-    optimizer.zero_grad()
-    y_pred = model(x)
-    loss = loss_fn(y_pred.squeeze(), y)
-    loss.backward()
-    optimizer.step()
-    if i % log_interval == 0:
-        wandb.log({"loss": loss.item()})
-        accuracy = (y_pred.round() == y).float().mean().item()
-        wandb.log({"accuracy": accuracy})
-        print(f"Step {step}, Loss: {loss.item()}, Accuracy: {accuracy}")
-
-        # Calculate and log per-task accuracy
-        x = testset.data
-        y = testset.targets
+    model.train()
+    for i, step in enumerate(range(n_steps)):
+        dataset = generate_dataset(n_task_bits, n_control_bits, tasks, subtask_probs, batch_size)
+        x = dataset.data
+        y = dataset.targets
+        optimizer.zero_grad()
         y_pred = model(x)
-        for task_id in range(n_control_bits):
-            task_mask = x[:, task_id] == 1
-            task_pred = y_pred[task_mask]
-            task_true = y[task_mask]
-            task_accuracy = (task_pred.round() == task_true).float().mean().item()
-            wandb.log({f"full_accuracies/task_{task_id}": task_accuracy})
+        loss = loss_fn(y_pred.squeeze(), y)
+        loss.backward()
+        optimizer.step()
+        if i % log_interval == 0:
+            wandb.log({"loss": loss.item()})
+            accuracy = (y_pred.squeeze().round() == y).float().mean().item()
+            wandb.log({"accuracy": accuracy})
+            print(f"Step {step}, Loss: {loss.item()}, Accuracy: {accuracy}")
 
-        # log the loss on each subtask
-        for j in range(n_control_bits):
-            # generate a dataset of size batch_size for each subtask
-            dataset = SingleTaskDataset(n_task_bits, n_control_bits, j, tasks[j], batch_size)
-            x = dataset.data
-            y = dataset.targets
-            y_pred = model(x)
-            loss = loss_fn(y_pred.squeeze(), y)
-            wandb.log({f"losses/task_{j}": loss.item()})
-            accuracy = (y_pred.round() == y).float().mean().item()
-            wandb.log({f"accuracies/task_{j}": accuracy})
+            # # Calculate and log per-task accuracy
+            # x = testset.data
+            # y = testset.targets
+            # y_pred = model(x)
+            # for task_id in range(n_control_bits):
+            #     task_mask = x[:, task_id] == 1
+            #     task_pred = y_pred[task_mask]
+            #     task_true = y[task_mask]
+            #     task_accuracy = (task_pred.round() == task_true).float().mean().item()
+            #     wandb.log({f"full_accuracies/task_{task_id}": task_accuracy})
 
-with torch.no_grad():
-    testset = generate_test_set(n_task_bits, n_control_bits, tasks)
-    
-    model.eval()
-    
-    x = testset.data
-    y = testset.targets
-    y_pred = model(x).round().squeeze()
-    
-    test_accuracy = (y == y_pred).float().mean().item()
-    print(f"Test Accuracy: {test_accuracy:.4f}")
-    wandb.log({"test_accuracy": test_accuracy})
-    
-    # Evaluate per-task accuracy
-    for task_id in range(n_control_bits):
-        task_mask = x[:, task_id] == 1
-        task_accuracy = (y_pred[task_mask] == y[task_mask]).float().mean().item()
-        print(f"Task {task_id} Accuracy: {task_accuracy:.4f}")
-        wandb.log({f"test_accuracies/task_{task_id}": task_accuracy})
+            # log the loss on each subtask
+            for j in range(n_control_bits):
+                # generate a dataset of size batch_size for each subtask
+                dataset = SingleTaskDataset(n_task_bits, n_control_bits, j, tasks[j], batch_size)
+                x = dataset.data
+                y = dataset.targets
+                y_pred = model(x)
+                loss = loss_fn(y_pred.squeeze(), y)
+                wandb.log({f"losses/task_{j}": loss.item()})
+                accuracy = (y_pred.squeeze().round() == y).float().mean().item()
+                wandb.log({f"accuracies/task_{j}": accuracy})
 
-wandb.finish()
-# save model
-torch.save(model.state_dict(), f"runs/model_{run_name}.pth")
+    # with torch.no_grad():
+    #     testset = generate_test_set(n_task_bits, n_control_bits, tasks)
+        
+    #     model.eval()
+        
+    #     x = testset.data
+    #     y = testset.targets
+    #     y_pred = model(x).round().squeeze()
+        
+    #     test_accuracy = (y == y_pred).float().mean().item()
+    #     print(f"Test Accuracy: {test_accuracy:.4f}")
+    #     wandb.log({"test_accuracy": test_accuracy})
+        
+    #     # Evaluate per-task accuracy
+    #     for task_id in range(n_control_bits):
+    #         task_mask = x[:, task_id] == 1
+    #         task_accuracy = (y_pred[task_mask] == y[task_mask]).float().mean().item()
+    #         print(f"Task {task_id} Accuracy: {task_accuracy:.4f}")
+    #         wandb.log({f"test_accuracies/task_{task_id}": task_accuracy})
+
+    wandb.finish()
+    # save model
+    torch.save(model.state_dict(), f"runs/model_{run_name}.pth")
 # %%

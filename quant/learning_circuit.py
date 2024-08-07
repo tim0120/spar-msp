@@ -10,37 +10,31 @@ class Gate:
         self,
         gate_type: str,
         operation: str | None = None,
-        inputs: list["Gate"] | None = None,
+        input_gates: list["Gate"] | None = None,
     ):
         self.gate_type = gate_type
         self.operation = operation
-        self.inputs = inputs if inputs else []
+        self.input_gates = input_gates if input_gates else []
 
     def __str__(self) -> str:
-        input_str = ", ".join([str(input_gate) for input_gate in self.inputs])
+        input_str = ", ".join([str(input_gate) for input_gate in self.input_gates])
         return f"{self.gate_type}({input_str})"
 
     def evaluate(self, input_values: list[int]) -> int:
         if self.operation == "INPUT":
-            return int(input_values.pop(0))
+            return input_values[0]
         elif self.operation == "AND":
-            return int(all(input_gate.evaluate(input_values.copy()) for input_gate in self.inputs))
+            return int(all(input_values))
         elif self.operation == "OR":
-            return int(any(input_gate.evaluate(input_values.copy()) for input_gate in self.inputs))
+            return int(any(input_values))
         elif self.operation == "NOT":
-            return int(not self.inputs[0].evaluate(input_values.copy()))
+            return int(not input_values[0])
         elif self.operation == "NAND":
-            return int(
-                not all(input_gate.evaluate(input_values.copy()) for input_gate in self.inputs)
-            )
+            return int(not all(input_values))
         elif self.operation == "NOR":
-            return int(
-                not any(input_gate.evaluate(input_values.copy()) for input_gate in self.inputs)
-            )
+            return int(not any(input_values))
         elif self.operation == "XOR":
-            return int(
-                sum(input_gate.evaluate(input_values.copy()) for input_gate in self.inputs) % 2 == 1
-            )
+            return int(sum(input_values) % 2 == 1)
         return 0
 
 
@@ -65,16 +59,16 @@ class BooleanCircuit:
             if layer_index == self.depth - 1:
                 # Final layer should have a single gate
                 gate_type = random.choice(["AND", "OR", "NAND", "NOR", "XOR"])
-                inputs = self.gates[-1]
-                gate = Gate(f"GATE {gate_id}", gate_type, inputs)
+                input_gates = self.gates[-1]
+                gate = Gate(f"GATE {gate_id}", gate_type, input_gates)
                 gate_id += 1
                 layer.append(gate)
             else:
                 for _ in range(self.width):
                     gate_type = random.choice(gate_types)
                     num_inputs = 1 if gate_type == "NOT" else random.randint(2, 3)
-                    inputs = random.sample(self.gates[-1], min(len(self.gates[-1]), num_inputs))
-                    gate = Gate(f"GATE {gate_id}", gate_type, inputs)
+                    input_gates = random.sample(self.gates[-1], min(len(self.gates[-1]), num_inputs))
+                    gate = Gate(f"GATE {gate_id}", gate_type, input_gates)
                     gate_id += 1
                     layer.append(gate)
             self.gates.append(layer)
@@ -84,24 +78,22 @@ class BooleanCircuit:
         for layer_idx, layer in enumerate(self.gates):
             circuit_str += f"Layer {layer_idx}:\n"
             for gate in layer:
-                input_str = ", ".join([input_gate.gate_type for input_gate in gate.inputs])
+                input_str = ", ".join([input_gate.gate_type for input_gate in gate.input_gates])
                 circuit_str += f"{gate.gate_type}: {gate.operation}({input_str})\n"
         return circuit_str
 
     def __call__(self, inputs: list[int]) -> tuple[list[int], list[list[int]]]:
-        input_values = inputs.copy()  # Make a copy of inputs to avoid modifying the original list
-        intermediate_values: list[list[int]] = []
-        current_values = input_values.copy()
-
-        for layer in self.gates:
-            next_values: list[int] = []
+        intermediate_values: list[list[int]] = [inputs]
+        
+        for layer_index, layer in enumerate(self.gates[1:], start=1):  # Skip the input layer
+            layer_values: list[int] = []
             for gate in layer:
-                if gate.operation == "INPUT":
-                    next_values.append(current_values.pop(0))
-                else:
-                    next_values.append(gate.evaluate(current_values.copy()))
-            intermediate_values.append(next_values)
-            current_values = next_values.copy()
+                gate_inputs = [
+                    intermediate_values[layer_index - 1][self.gates[layer_index - 1].index(input_gate)]
+                    for input_gate in gate.input_gates
+                ]
+                layer_values.append(gate.evaluate(gate_inputs))
+            intermediate_values.append(layer_values)
 
         output_values = intermediate_values[-1]
         return output_values, intermediate_values
@@ -127,7 +119,7 @@ class BooleanCircuit:
         # Add edges based on gate inputs
         for layer in self.gates:
             for gate in layer:
-                for input_gate in gate.inputs:
+                for input_gate in gate.input_gates:
                     G.add_edge(node_ids[input_gate], node_ids[gate])
 
         fig, ax = plt.subplots(figsize=(12, 8))
@@ -145,13 +137,14 @@ class BooleanCircuit:
         plt.title("Boolean Circuit Computational Graph")
         plt.show()
 
-
-width = 5
-circuit = BooleanCircuit(width, 2)
-circuit.plot_circuit()
-# test the circuit with all possible boolean inputs
-for i in range(2**width):
-    input_vector = [int(x) for x in list(bin(i)[2:].zfill(width))]
-    output_vector, intermediate_values = circuit(input_vector)
-    print("Input Vector:", input_vector)
-    print("Intermediate Values:", intermediate_values)
+if __name__ == "__main__":
+    width = 3
+    depth = 2
+    circuit = BooleanCircuit(width, depth)
+    circuit.plot_circuit()
+    # test the circuit with all possible boolean inputs
+    for i in range(2**width):
+        input_vector = [int(x) for x in list(bin(i)[2:].zfill(width))]
+        output_vector, intermediate_values = circuit(input_vector)
+        print("Input Vector:", input_vector)
+        print("Intermediate Values:", intermediate_values)
