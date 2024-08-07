@@ -58,7 +58,8 @@ class BooleanCircuit:
             layer: list[Gate] = []
             if layer_index == self.depth - 1:
                 # Final layer should have a single gate
-                gate_type = random.choice(["AND", "OR", "NAND", "NOR", "XOR"])
+                # gate_type = random.choice(["AND", "OR", "NAND", "NOR", "XOR"])
+                gate_type = "XOR"
                 input_gates = self.gates[-1]
                 gate = Gate(f"GATE {gate_id}", gate_type, input_gates)
                 gate_id += 1
@@ -122,7 +123,7 @@ class BooleanCircuit:
                 for input_gate in gate.input_gates:
                     G.add_edge(node_ids[input_gate], node_ids[gate])
 
-        fig, ax = plt.subplots(figsize=(12, 8))
+        fig, ax = plt.subplots(figsize=(6, 4))
         nx.draw(
             G,
             pos,
