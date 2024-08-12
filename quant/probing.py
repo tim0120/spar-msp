@@ -142,11 +142,13 @@ def check_probe_accuracies(hooked_mlp: HookedMLP, probes: Dict[str, nn.Module], 
         if layer_name == 'output':
             continue
         probe.eval()
+        probe.to(device)
         with torch.no_grad():
-            probe_output = probe(hooked_mlp.activations[layer_name])
+            layer_activations = hooked_mlp.activations[layer_name].to(device)
+            probe_output = probe(layer_activations)
             predicted = (probe_output > 0.5).float()
             # Calculate accuracy for each gate
-            gate_accuracies = [(predicted[:, i] == intermediates[:, i]).sum().item() / num_samples * 100 for i in range(intermediates.size(1))]
+            gate_accuracies = [round((predicted[:, i] == intermediates[:, i]).sum().item() / num_samples * 100, 2) for i in range(intermediates.size(1))]
             accuracies[layer_name] = gate_accuracies
     return accuracies
 
